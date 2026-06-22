@@ -159,6 +159,73 @@ def build_word(images, output_path):
     doc.save(output_path)
 
 
+def generate_from_groups(groups_json):
+    """New entry point: takes pre-classified groups (l1/l2/photos), generates one Word per group."""
+    groups = json.loads(groups_json)
+    output = ROOT / "output"
+    if output.exists():
+        shutil.rmtree(output)
+    output.mkdir(parents=True)
+
+    errors = []
+    report = []
+
+    for group in groups:
+        l1 = safe_name(group.get("l1", ""), "未命名")
+        l2 = safe_name(group.get("l2", ""), "未命名")
+        photo_names = group.get("photos", [])
+
+        dest = output / l1 / l2
+        dest.mkdir(parents=True, exist_ok=True)
+
+        word_images = []
+        for idx, fname in enumerate(photo_names, 1):
+            src = ROOT / "input" / fname
+            if not src.exists():
+                errors.append(f"找不到照片：{fname}")
+                continue
+            # Rename to 照片NN_原檔名 (strip the leading index prefix we added)
+            original_name = "_".join(fname.split("_")[1:]) if "_" in fname else fname
+            target = unique_path(dest / original_name)
+            shutil.copy2(src, target)
+            word_images.append(target)
+
+        if not word_images:
+            errors.append(f"{l1}/{l2} 沒有可用照片，跳過")
+            continue
+
+        try:
+            build_word(word_images, dest / f"{safe_name(l1 + l2)}_貼照片.docx")
+        except Exception as e:
+            errors.append(f"{l1}/{l2} Word 產生失敗：{e}")
+
+        report.append((l1, l2, len(word_images)))
+
+    # CSV report
+    with (output / "分類報告.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["地址數", len(report)])
+        writer.writerow(["照片總數", sum(r[2] for r in report)])
+        if errors:
+            writer.writerow([])
+            writer.writerow(["錯誤紀錄"])
+            for err in errors:
+                writer.writerow([err])
+        writer.writerow([])
+        writer.writerow(["第一層地址", "第二層地址", "照片數量"])
+        writer.writerows(report)
+
+    # Pack ZIP
+    archive_path = ROOT / "results.zip"
+    if archive_path.exists():
+        archive_path.unlink()
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as arc:
+        for path in output.rglob("*"):
+            if path.is_file():
+                arc.write(path, path.relative_to(output))
+    return str(archive_path)
+
+
 def generate_results(records_json):
     records = json.loads(records_json)
     if OUTPUT.exists():
