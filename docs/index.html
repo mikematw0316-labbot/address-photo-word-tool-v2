@@ -230,26 +230,28 @@ async function expandSelected() {
 }
 
 // ─── Image preprocessing for OCR ─────────────────────────────────────────────
-// Crops to left 55% of image (where the clipboard/board always appears),
-// converts to grayscale, and boosts contrast so Tesseract can read hand-written text.
+// Converts full image to grayscale + contrast stretch so Tesseract can read
+// hand-written text on clipboards regardless of where the board appears in the photo.
+// Also downscales to max 1600px wide to keep OCR fast without losing detail.
 function preprocessForOCR(blob) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(blob);
     img.onload = () => {
       URL.revokeObjectURL(url);
-      // Crop to left 55% of image – board is always on the left side
-      const cropW = Math.floor(img.width * 0.55);
-      const cropH = img.height;
+      // Downscale if very large (Tesseract is slower on huge images, accuracy similar)
+      const MAX_W = 1600;
+      const scale = img.width > MAX_W ? MAX_W / img.width : 1;
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
       const canvas = document.createElement('canvas');
-      canvas.width = cropW;
-      canvas.height = cropH;
+      canvas.width = w;
+      canvas.height = h;
       const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, cropW, cropH, 0, 0, cropW, cropH);
-      // Grayscale + contrast stretch
-      const imgData = ctx.getImageData(0, 0, cropW, cropH);
+      ctx.drawImage(img, 0, 0, w, h);
+      // Grayscale + contrast stretch (histogram normalization)
+      const imgData = ctx.getImageData(0, 0, w, h);
       const d = imgData.data;
-      // Find min/max luminance for stretch
       let minL = 255, maxL = 0;
       for (let i = 0; i < d.length; i += 4) {
         const l = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
@@ -365,9 +367,9 @@ $('analyze').onclick = async () => {
         worker = await Tesseract.createWorker(['chi_tra','eng'], 1, {
           errorHandler: e => console.error('OCR worker error', e)
         });
-        // SINGLE_BLOCK: treats input as single uniform text block - better for clipboards
+        // AUTO: let Tesseract detect layout automatically - best for photos with signs/boards
         await worker.setParameters({
-          tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK,
+          tessedit_pageseg_mode: Tesseract.PSM.AUTO,
           preserve_interword_spaces: '1'
         });
       } catch(e) {
@@ -388,17 +390,9 @@ $('analyze').onclick = async () => {
       let ocr = '';
       if (worker) {
         try {
-          // Preprocess: crop to left 55% + grayscale + contrast stretch
+          // Preprocess: full image, grayscale + contrast stretch + downscale
           const preprocessed = await preprocessForOCR(f.blob);
           ocr = (await worker.recognize(preprocessed)).data.text.trim();
-          // If result looks mostly noise (too many non-CJK chars), try full image fallback
-          const cjkRatio = (ocr.match(/[\u4e00-\u9fff]/g) || []).length / (ocr.length || 1);
-          if (cjkRatio < 0.15 && ocr.length > 10) {
-            console.info('預處理 OCR 效果差，嘗試全圖辨識：', f.name);
-            const fallback = (await worker.recognize(f.blob)).data.text.trim();
-            const fallbackRatio = (fallback.match(/[\u4e00-\u9fff]/g) || []).length / (fallback.length || 1);
-            if (fallbackRatio > cjkRatio) ocr = fallback;
-          }
         } catch(e) {
           // Fix bug #3: per-photo OCR failure should not abort entire batch
           console.warn('照片 OCR 失敗，標記為待確認：', f.name, e);
